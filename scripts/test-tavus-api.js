@@ -10,7 +10,7 @@
 require('dotenv').config();
 
 const TAVUS_BASE_URL = 'https://tavusapi.com/v2';
-const SANDBOX_URL = 'https://sandbox.tavusapi.com/v2';
+const SANDBOX_URL = 'https://tavusapi.com/v2';
 
 class TavusAPITester {
   constructor() {

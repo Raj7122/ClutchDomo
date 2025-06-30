@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import TavusVideoAgent from '@/components/TavusVideoAgent';
 import { supabase } from '@/lib/supabaseClient';
+import { createTavusSession } from '@/lib/tavusSessionManager';
 
 interface Demo {
   id: string;
@@ -38,18 +39,16 @@ interface TavusSession {
 }
 
 export default function LiveDemoPage() {
-  const params = useParams();
-  const demoId = params.id as string;
-  
+  const { id: demoId } = useParams() as { id: string };
   const [demo, setDemo] = useState<Demo | null>(null);
   const [videos, setVideos] = useState<Video[]>([]);
   const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeBaseChunk[]>([]);
-  const [tavusSession, setTavusSession] = useState<TavusSession | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [agentStatus, setAgentStatus] = useState<'initializing' | 'ready' | 'error'>('initializing');
-
-
+  const [error, setError] = useState('');
+  const [tavusSession, setTavusSession] = useState<TavusSession | null>(null);
+  const [agentStatus, setAgentStatus] = useState<string>('loading'); // loading, ready, active, error
+  
+  // Supabase client is imported from lib/supabaseClient
 
   useEffect(() => {
     if (demoId) {
@@ -60,6 +59,7 @@ export default function LiveDemoPage() {
   const loadDemoData = async () => {
     try {
       setLoading(true);
+      setAgentStatus('loading');
       
       // Load demo details
       const { data: demoData, error: demoError } = await supabase
@@ -100,80 +100,53 @@ export default function LiveDemoPage() {
       } else {
         setKnowledgeBase(kbData || []);
       }
-
-      // Check for existing Tavus session
-      const { data: sessionData, error: sessionError } = await supabase
-        .from('tavus_sessions')
-        .select('*')
-        .eq('demo_id', demoId)
-        .eq('session_status', 'active')
-        .order('created_at', { ascending: false })
-        .limit(1);
-
-      if (sessionError) {
-        console.error('Error loading Tavus session:', sessionError);
-      }
+      
+      // Use our robust session manager to handle both new and existing sessions
+      console.log('Getting Tavus session for demo:', demoId);
+      
+      const demoDataForTavus = {
+        title: demoData.title,
+        videos: videosData?.map(video => ({
+          id: video.id,
+          title: video.title,
+          order_index: video.order_index
+        })) || [],
+        knowledgeBase: kbData?.map(chunk => chunk.content).join('\n') || '',
+        ctaLink: demoData.cta_link
+      };
 
       let conversationUrl = null;
-
-      if (sessionData && sessionData.length > 0) {
-        // Use existing session
-        const session = sessionData[0];
-        conversationUrl = session.conversation_data?.conversation_url;
-        console.log('Using existing Tavus session:', session.tavus_conversation_id);
+      try {
+        // Use our robust session manager that handles race conditions
+        setAgentStatus('initializing');
+        const result = await createTavusSession(demoId, demoDataForTavus);
         
-        setTavusSession({
-          conversation_id: session.tavus_conversation_id,
-          conversation_url: conversationUrl,
-          status: session.session_status
-        });
-      } else {
-        // Create new Tavus session
-        console.log('Creating new Tavus session for demo:', demoId);
-        
-        const demoDataForTavus = {
-          title: demoData.title,
-          videos: videosData?.map(video => ({
-            id: video.id,
-            title: video.title,
-            order_index: video.order_index
-          })) || [],
-          knowledgeBase: kbData?.map(chunk => chunk.content).join('\n') || '',
-          ctaLink: demoData.cta_link
-        };
-
-        try {
-          const response = await fetch('/api/tavus/create-session', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              demoId: demoId,
-              demoData: demoDataForTavus
-            })
-          });
-
-          if (response.ok) {
-            const result = await response.json();
-            conversationUrl = result.conversation_url;
-            
-            setTavusSession({
-              conversation_id: result.conversation_id,
-              conversation_url: conversationUrl,
-              status: result.status
-            });
-            
-            console.log('New Tavus session created:', result.conversation_id);
-          } else {
-            throw new Error('Failed to create Tavus session');
+        // Use conversation_data from result object if stored as JSON string
+        let conversationData = result.conversation_data;
+        if (typeof conversationData === 'string') {
+          try {
+            conversationData = JSON.parse(conversationData);
+          } catch (e) {
+            console.warn('Failed to parse conversation_data:', e);
+            conversationData = {};
           }
-        } catch (sessionCreationError) {
-          console.error('Error creating Tavus session:', sessionCreationError);
-          setError('Failed to initialize AI assistant');
-          setAgentStatus('error');
-          return;
         }
+        
+        // Get URL from conversation_data or main object based on schema
+        conversationUrl = conversationData?.conversation_url || result.conversation_url;
+        
+        // Set the tavus session with extracted data
+        setTavusSession({
+          conversation_id: result.conversation_id,
+          conversation_url: conversationUrl,
+          status: result.status || 'active'
+        });
+        
+        console.log('Tavus session obtained successfully:', result.conversation_id);
+      } catch (sessionError) {
+        console.error('Error creating/getting Tavus session:', sessionError);
+        setError('Failed to initialize AI assistant');
+        setAgentStatus('error');
       }
 
       // Check if conversation URL is valid
@@ -228,23 +201,17 @@ export default function LiveDemoPage() {
     );
   }
 
-  const demoData = {
-    id: demo.id,
-    title: demo.title,
-    videos: videos.map(video => ({
-      id: video.id,
-      title: video.title,
-      video_url: video.video_url,
-      order_index: video.order_index
-    })),
-    knowledge_base: knowledgeBase,
-    ctaLink: demo.cta_link || undefined
-  };
-
   return (
     <div className="demo-live-container">
       <TavusVideoAgent
-        demoData={demoData}
+        demoData={{
+          id: demo.id,
+          title: demo.title,
+          videos: videos,
+          knowledge_base: knowledgeBase,
+          ctaLink: demo.cta_link ?? undefined
+        }}
+        conversationUrl={tavusSession.conversation_url}
         onVideoStarted={handleVideoStarted}
         onError={(error) => {
           console.error('TavusVideoAgent error:', error);

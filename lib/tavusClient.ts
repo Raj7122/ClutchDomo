@@ -33,6 +33,7 @@ interface TavusConversation {
   conversation_url?: string;
   max_call_duration?: number;
   participant_count?: number;
+  metadata?: any; // Custom field to store additional metadata
 }
 
 interface TavusMessage {
@@ -47,18 +48,24 @@ interface TavusMessage {
 }
 
 interface TavusConversationRequest {
-  replica_id: string;
-  callback_url?: string;
-  properties?: any;
+  replica_id?: string;  // Required if persona doesn't have default replica
+  persona_id: string;   // Required
   conversation_name?: string;
-  max_call_duration?: number;
-  persona_id?: string;
+  conversational_context?: string;
+  callback_url?: string;
   custom_greeting?: string;
-  conversation_config?: {
+  audio_only?: boolean;
+  properties?: {
+    max_call_duration?: number;
+    participant_left_timeout?: number;
+    participant_absent_timeout?: number;
     enable_recording?: boolean;
-    enable_transcription?: boolean;
+    enable_closed_captions?: boolean;
+    apply_greenscreen?: boolean;
     language?: string;
-    voice_settings?: any;
+    recording_s3_bucket_name?: string;
+    recording_s3_bucket_region?: string;
+    aws_assume_role_arn?: string;
   };
 }
 
@@ -124,7 +131,7 @@ export class TavusClient {
     this.isConfigured = isConfigured;
     this.baseUrl = tavusEnvironment === 'production' 
       ? 'https://tavusapi.com/v2' 
-      : 'https://sandbox.tavusapi.com/v2';
+      : 'https://tavusapi.com/v2';
     
     console.log(`Tavus client initialized for ${this.environment} environment (configured: ${this.isConfigured})`);
   }
@@ -144,6 +151,7 @@ export class TavusClient {
       const response = await fetch(url, {
         ...options,
         headers: {
+          // Use the correct authentication header format based on Tavus API documentation
           'x-api-key': this.apiKey,
           'Content-Type': 'application/json',
           'User-Agent': 'DOMO-App/1.0',
@@ -282,6 +290,33 @@ export class TavusClient {
     }
   }
 
+  // End an active conversation to manage concurrency
+  async endConversation(conversationId: string): Promise<void> {
+    console.log(`Ending Tavus conversation: ${conversationId}`);
+    const url = `${this.baseUrl}/conversations/${conversationId}/end`;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'x-api-key': this.apiKey,
+          'Content-Type': 'application/json',
+          'User-Agent': 'DOMO-App/1.0',
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Failed to end conversation ${conversationId}: ${response.status} ${response.statusText} - ${errorText}`);
+        throw new Error(`Failed to end conversation: ${response.status} ${response.statusText}`);
+      }
+
+      console.log(`Successfully ended conversation: ${conversationId}`);
+    } catch (error) {
+      console.error(`Error during endConversation fetch for ${conversationId}:`, error);
+      throw error;
+    }
+  }
+
   // Get available replicas with enhanced error handling
   async getReplicas(): Promise<TavusReplica[]> {
     try {
@@ -328,46 +363,60 @@ export class TavusClient {
 
   // Create a new conversation with enhanced configuration
   async createConversation(replicaId: string, metadata?: any): Promise<TavusConversation> {
+    // Format request according to Tavus API documentation and our successful verification tests
     const requestData: TavusConversationRequest = {
       replica_id: replicaId,
-      callback_url: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/tavus/webhook`,
-      properties: {
-        ...metadata,
-        environment: this.environment,
-        created_by: 'domo-app'
-      },
+      // Get persona_id from metadata or use a default if not provided
+      persona_id: metadata?.persona_id || 'p7fb0be3', // Default to first available persona
       conversation_name: `Demo-${metadata?.demo_id || 'unknown'}-${Date.now()}`,
-      max_call_duration: 1800, // 30 minutes
-      conversation_config: {
-        enable_recording: true,
-        enable_transcription: true,
-        language: 'en-US',
-        voice_settings: {
-          stability: 0.7,
-          similarity_boost: 0.8,
-          style: 0.2
-        }
-      }
+      // Add optional callback URL if available
+      callback_url: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/tavus/webhook`
     };
+    
+    // Add optional conversational context if provided
+    if (metadata?.context) {
+      requestData.conversational_context = metadata.context;
+    }
+    
+    // Add valid properties according to API docs
+    if (metadata?.max_call_duration || metadata?.enable_recording || true) {
+      requestData.properties = {
+        max_call_duration: metadata?.max_call_duration || 3600, // Default 1 hour
+        participant_left_timeout: 60,
+        participant_absent_timeout: 300,
+        enable_recording: metadata?.enable_recording === false ? false : true,
+        // Use multilingual language mode per Tavus support recommendation
+        language: "multilingual"
+      };
+    }
+    
+    // Add custom greeting if provided
+    if (metadata?.custom_greeting) {
+      requestData.custom_greeting = metadata.custom_greeting;
+    }
 
     try {
       console.log('Creating Tavus conversation with replica:', replicaId);
+      console.log('Payload:', JSON.stringify(requestData, null, 2));
       const result = await this.makeRequest('/conversations', {
         method: 'POST',
         body: JSON.stringify(requestData)
       });
       
+      // Structure response data based on what's actually returned
       const conversation: TavusConversation = {
-        conversation_id: result.conversation_id || result.id,
+        conversation_id: result.id || result.conversation_id,
         replica_id: replicaId,
         status: result.status || 'active',
         created_at: result.created_at || new Date().toISOString(),
-        callback_url: requestData.callback_url,
-        properties: requestData.properties,
-        conversation_url: result.conversation_url || result.url || result.embed_url,
-        max_call_duration: requestData.max_call_duration,
+        conversation_url: result.url || result.conversation_url || result.embed_url,
         participant_count: 0
       };
+      
+      // Store metadata in a safer way if needed
+      if (metadata) {
+        conversation['metadata'] = metadata;
+      }
       
       console.log('Tavus conversation created successfully:', conversation.conversation_id);
       return conversation;
@@ -380,12 +429,10 @@ export class TavusClient {
         replica_id: replicaId,
         status: 'active',
         created_at: new Date().toISOString(),
-        callback_url: requestData.callback_url,
-        properties: requestData.properties,
         conversation_url: `https://tavus.daily.co/${realisticConversationId}?verbose=true`,
-        max_call_duration: requestData.max_call_duration
+        participant_count: 0,
+        metadata: metadata // Store metadata if available
       };
-      
       console.log('Using mock conversation due to API error');
       return mockConversation;
     }
@@ -461,23 +508,7 @@ export class TavusClient {
     }
   }
 
-  // End a conversation with cleanup
-  async endConversation(conversationId: string, reason?: string): Promise<void> {
-    try {
-      console.log('Ending conversation:', conversationId, reason ? `(${reason})` : '');
-      await this.makeRequest(`/conversations/${conversationId}/end`, {
-        method: 'POST',
-        body: JSON.stringify({
-          reason: reason || 'user_ended',
-          timestamp: new Date().toISOString()
-        })
-      });
-      console.log('Conversation ended successfully');
-    } catch (error) {
-      console.error('Failed to end conversation:', error);
-      // Continue silently for development/fallback
-    }
-  }
+
 
   // Get conversation status with detailed information
   async getConversationStatus(conversationId: string): Promise<any> {

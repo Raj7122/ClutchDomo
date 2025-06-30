@@ -178,55 +178,142 @@ export default function VideoUploadPage() {
     return null;
   };
 
-  // Generate video thumbnail
+  // Enhanced video thumbnail generator with reliability improvements
   const generateThumbnail = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
-      const video = document.createElement('video');
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
+      // Validate file type
+      if (!file.type.startsWith('video/')) {
+        console.error(`Invalid file type for thumbnail generation: ${file.type}`);
+        return reject(new Error(`Invalid file type: ${file.type}`));
+      }
 
-      video.onloadedmetadata = () => {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        
-        video.currentTime = Math.min(2, video.duration / 4); // Thumbnail at 2s or 1/4 duration
-      };
-
-      video.onseeked = () => {
-        if (ctx) {
-          ctx.drawImage(video, 0, 0);
-          const thumbnail = canvas.toDataURL('image/jpeg', 0.8);
-          resolve(thumbnail);
-        } else {
-          reject(new Error('Failed to get canvas context'));
-        }
-      };
-
-      video.onerror = () => reject(new Error('Failed to load video'));
+      console.log(`Generating thumbnail for: ${file.name} (${file.type})`);
       
-      video.src = URL.createObjectURL(file);
+      const video = document.createElement('video');
+      video.preload = 'metadata';
+      video.crossOrigin = 'anonymous';
+      video.playsInline = true;
+
+      // We'll capture frame at 1 second or 25% of video duration, whichever comes first
+      video.addEventListener('loadedmetadata', () => {
+        const captureTime = Math.min(1, video.duration * 0.25);
+        video.currentTime = captureTime;
+        console.log(`Setting capture point at ${captureTime}s`);
+      });
+
+      video.addEventListener('seeked', () => {
+        try {
+          console.log('Video seeked to capture point, generating thumbnail...');
+          const canvas = document.createElement('canvas');
+          
+          // Cap resolution to reasonable thumbnail size (max 720p)
+          const maxWidth = 1280;
+          const maxHeight = 720;
+          let width = video.videoWidth;
+          let height = video.videoHeight;
+          
+          if (width > maxWidth || height > maxHeight) {
+            const aspectRatio = width / height;
+            if (width > height) {
+              width = maxWidth;
+              height = width / aspectRatio;
+            } else {
+              height = maxHeight;
+              width = height * aspectRatio;
+            }
+          }
+          
+          canvas.width = width;
+          canvas.height = height;
+
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const thumbnail = canvas.toDataURL('image/jpeg', 0.85);
+            console.log(`Thumbnail generated successfully: ${thumbnail.substring(0, 50)}...`);
+            resolve(thumbnail);
+          } else {
+            reject(new Error('Failed to get canvas context'));
+          }
+          
+          // Clean up
+          URL.revokeObjectURL(video.src);
+        } catch (err) {
+          console.error('Error generating thumbnail:', err);
+          reject(err);
+          // Clean up
+          URL.revokeObjectURL(video.src);
+        }
+      });
+
+      // Enhanced error handler
+      video.onerror = (e) => {
+        console.error('Thumbnail generation error:', e);
+        console.error('Video error details:', (video as any).error);
+        reject(new Error(`Failed to load video for thumbnail: ${file.name}`));
+        URL.revokeObjectURL(video.src);
+      };
+      
+      // Create object URL and set as source
+      const objectUrl = URL.createObjectURL(file);
+      console.log(`Created object URL for thumbnail generation: ${objectUrl}`);
+      video.src = objectUrl;
+      video.load(); // Force load
     });
   };
 
-  // Get video metadata
+  // Get video metadata with enhanced error handling
   const getVideoMetadata = (file: File): Promise<{ duration: number; width: number; height: number }> => {
     return new Promise((resolve, reject) => {
+      // Validate file type
+      if (!file.type.startsWith('video/')) {
+        console.error(`Invalid file type: ${file.type}. Expected video/*`);
+        return reject(new Error(`Invalid file type: ${file.type}`));
+      }
+      
+      // Log file details for debugging
+      console.log(`Processing video: ${file.name} (${file.type}, ${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+      
       const video = document.createElement('video');
       
+      // Add preload attribute to ensure metadata loads
+      video.preload = 'metadata';
+      
+      // Set crossOrigin to anonymous to avoid CORS issues
+      video.crossOrigin = 'anonymous';
+      
+      // Success handler
       video.onloadedmetadata = () => {
+        console.log(`Video metadata loaded successfully: duration=${video.duration}s, dimensions=${video.videoWidth}x${video.videoHeight}`);
         resolve({
           duration: video.duration,
           width: video.videoWidth,
           height: video.videoHeight
         });
+        
+        // Clean up object URL to prevent memory leaks
+        URL.revokeObjectURL(video.src);
       };
 
-      video.onerror = () => reject(new Error('Failed to load video metadata'));
-      video.src = URL.createObjectURL(file);
+      // Enhanced error handler with detailed logging
+      video.onerror = (e) => {
+        console.error('Video metadata loading failed:', e);
+        console.error('Video error code:', (video as any).error?.code);
+        console.error('Video error message:', (video as any).error?.message);
+        reject(new Error(`Failed to load video metadata: ${file.name} (${file.type})`));
+        
+        // Clean up object URL to prevent memory leaks
+        URL.revokeObjectURL(video.src);
+      };
+      
+      // Create object URL and set as source
+      const objectUrl = URL.createObjectURL(file);
+      console.log(`Created object URL for video: ${objectUrl}`);
+      video.src = objectUrl;
     });
   };
 
-  // Process video file
+  // Process video file with fallback methods
   const processVideo = async (videoData: UploadedVideo) => {
     if (!demoId) {
       setUploadedVideos(prev => 
@@ -248,16 +335,66 @@ export default function VideoUploadPage() {
         throw new Error('Not authenticated');
       }
 
-      // Generate thumbnail and get metadata
+      // Set processing state
       setUploadedVideos(prev => 
         prev.map(v => v.id === videoId ? { ...v, status: 'processing', progress: 10 } : v)
       );
 
-      const [thumbnail, metadata] = await Promise.all([
-        generateThumbnail(videoData.file),
-        getVideoMetadata(videoData.file)
-      ]);
+      // Fallback metadata values if extraction fails
+      let thumbnail: string;
+      let metadata = {
+        duration: 0, // Default duration
+        width: 640,  // Default width
+        height: 360  // Default height
+      };
 
+      try {
+        // Try primary method
+        [thumbnail, metadata] = await Promise.all([
+          generateThumbnail(videoData.file),
+          getVideoMetadata(videoData.file)
+        ]);
+        console.log('Successfully extracted video metadata and thumbnail with primary method');
+      } catch (primaryError) {
+        console.warn('Primary video processing failed, attempting fallback method:', primaryError);
+
+        // Generate a placeholder thumbnail
+        const canvas = document.createElement('canvas');
+        canvas.width = 640;
+        canvas.height = 360;
+        const ctx = canvas.getContext('2d');
+        
+        if (ctx) {
+          // Create a gradient background
+          const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+          gradient.addColorStop(0, '#4338CA');
+          gradient.addColorStop(1, '#3B82F6');
+          ctx.fillStyle = gradient;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          
+          // Add file name
+          ctx.fillStyle = 'white';
+          ctx.font = 'bold 24px Arial';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(videoData.file.name, canvas.width / 2, canvas.height / 2);
+          
+          thumbnail = canvas.toDataURL('image/jpeg', 0.9);
+
+          // Set default metadata - could be refined with additional methods
+          metadata = {
+            duration: 30, // Default to 30 seconds if unknown
+            width: 640,
+            height: 360
+          };
+          
+          console.log('Generated fallback thumbnail and metadata');
+        } else {
+          throw new Error('Failed to create fallback thumbnail');
+        }
+      }
+
+      // Update video with extracted metadata
       setUploadedVideos(prev => 
         prev.map(v => v.id === videoId ? { 
           ...v, 
@@ -273,50 +410,91 @@ export default function VideoUploadPage() {
         } : v)
       );
 
-      // Simulate upload progress
-      for (let progress = 30; progress <= 90; progress += 10) {
-        await new Promise(resolve => setTimeout(resolve, 200));
-        setUploadedVideos(prev => 
-          prev.map(v => v.id === videoId ? { ...v, progress } : v)
-        );
-      }
-
       // Create form data for video upload
       const formData = new FormData();
       formData.append('video', videoData.file);
       formData.append('demoId', demoId);
       formData.append('orderIndex', videoData.orderIndex.toString());
       formData.append('title', videoData.title || videoData.file.name);
-
-      // Upload video
-      const response = await fetch('/api/demos/upload-video', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${session.access_token}`
-        },
-        body: formData
-      });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.error || 'Upload failed');
-      }
-
-      // Update video status with success
-      setUploadedVideos(prev => 
-        prev.map(v => v.id === videoId ? { 
-          ...v, 
-          status: 'completed', 
-          progress: 100,
-          videoUrl: result.data.videoUrl,
-          dbId: result.data.id
-        } : v)
-      );
+      formData.append('duration', metadata.duration.toString());
+      formData.append('width', metadata.width.toString());
+      formData.append('height', metadata.height.toString());
       
-      // Trigger auto-save
-      autoSave();
+      // Add thumbnail
+      const thumbnailBlob = await (async () => {
+        try {
+          // Convert data URL to Blob
+          const res = await fetch(thumbnail);
+          return await res.blob();
+        } catch (err) {
+          console.error('Error converting thumbnail to blob:', err);
+          // Create a simple colored rectangle as fallback
+          const canvas = document.createElement('canvas');
+          canvas.width = 320;
+          canvas.height = 180;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.fillStyle = '#3B82F6';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            const blob = await new Promise<Blob | null>(resolve => {
+              canvas.toBlob(resolve, 'image/jpeg', 0.9);
+            });
+            return blob || new Blob([''], { type: 'image/jpeg' });
+          }
+          return new Blob([''], { type: 'image/jpeg' });
+        }
+      })();
+      
+      formData.append('thumbnail', thumbnailBlob, `${videoId}-thumbnail.jpg`);
 
+      // Show upload progress
+      let progressInterval: NodeJS.Timeout | null = null;
+      
+      try {
+        // Start progress animation
+        let progress = 30;
+        progressInterval = setInterval(() => {
+          if (progress < 85) {
+            progress += 5;
+            setUploadedVideos(prev => 
+              prev.map(v => v.id === videoId ? { ...v, progress } : v)
+            );
+          }
+        }, 500);
+        
+        const response = await fetch('/api/demos/upload-video', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${session.access_token}`
+          },
+          body: formData
+        });
+
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || 'Upload failed');
+        }
+
+        // Update video status with success
+        setUploadedVideos(prev => 
+          prev.map(v => v.id === videoId ? { 
+            ...v, 
+            status: 'completed', 
+            progress: 100,
+            videoUrl: result.data.videoUrl,
+            dbId: result.data.id
+          } : v)
+        );
+        
+        // Trigger auto-save
+        autoSave();
+      } finally {
+        // Clear interval if it was set
+        if (progressInterval) {
+          clearInterval(progressInterval);
+        }
+      }
     } catch (error) {
       console.error('Video processing error:', error);
       setUploadedVideos(prev => 

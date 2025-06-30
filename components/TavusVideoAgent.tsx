@@ -160,7 +160,6 @@ const TavusVideoAgent: React.FC<TavusVideoAgentProps> = ({
         const uniqueId = `daily-frame-${demoData.id}-${Date.now()}`;
         
         const dailyCallObject = DailyIframe.createFrame({
-          id: uniqueId,
           iframeStyle: {
             width: '100%',
             height: '100%',
@@ -218,8 +217,9 @@ const TavusVideoAgent: React.FC<TavusVideoAgentProps> = ({
         // Append to fullscreen container
         if (fullscreenContainerRef.current) {
           const videoContainer = fullscreenContainerRef.current.querySelector('.video-container');
-          if (videoContainer) {
-            videoContainer.appendChild(dailyCallObject.iframe());
+          const iframe = dailyCallObject.iframe();
+          if (videoContainer && iframe) {
+            videoContainer.appendChild(iframe);
           }
         }
 
@@ -271,7 +271,7 @@ const TavusVideoAgent: React.FC<TavusVideoAgentProps> = ({
       prompt += '. You can reference these videos when discussing the product. ';
     }
 
-    if (demoData.knowledge_base?.length > 0) {
+    if (demoData.knowledge_base && demoData.knowledge_base.length > 0) {
       prompt += `You also have access to detailed product knowledge and documentation. `;
     }
 
@@ -288,8 +288,9 @@ const TavusVideoAgent: React.FC<TavusVideoAgentProps> = ({
   const togglePiP = () => {
     if (isFullscreen && callRef.current) {
       const pipVideoContainer = pipContainerRef.current?.querySelector('.video-container');
-      if (pipVideoContainer) {
-        pipVideoContainer.appendChild(callRef.current.iframe());
+      const iframe = callRef.current.iframe();
+      if (pipVideoContainer && iframe) {
+        pipVideoContainer.appendChild(iframe);
         setIsFullscreen(false);
       }
     }
@@ -299,8 +300,9 @@ const TavusVideoAgent: React.FC<TavusVideoAgentProps> = ({
   const toggleFullscreen = () => {
     if (!isFullscreen && callRef.current) {
       const fullscreenVideoContainer = fullscreenContainerRef.current?.querySelector('.video-container');
-      if (fullscreenVideoContainer) {
-        fullscreenVideoContainer.appendChild(callRef.current.iframe());
+      const iframe = callRef.current.iframe();
+      if (fullscreenVideoContainer && iframe) {
+        fullscreenVideoContainer.appendChild(iframe);
         setIsFullscreen(true);
         setShowVideoPlayer(false);
       }

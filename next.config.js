@@ -15,6 +15,13 @@ const nextConfig = {
   // Enable experimental features for better Supabase compatibility
   experimental: {
     serverComponentsExternalPackages: ['@supabase/supabase-js']
+  },
+  // Fix Supabase realtime-js webpack warning
+  webpack: (config, { isServer }) => {
+    // Suppress the critical dependency warning from @supabase/realtime-js
+    config.module.exprContextCritical = false;
+    
+    return config;
   }
 };
 
